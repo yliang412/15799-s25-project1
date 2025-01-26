@@ -27,6 +27,7 @@ submission.zip
 input/
 output/
 data/
+queries/
 duckdb
 *.db
 *.tgz
