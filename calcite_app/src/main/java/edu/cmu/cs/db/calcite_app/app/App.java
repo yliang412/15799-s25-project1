@@ -7,9 +7,12 @@ import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.text.MessageFormat;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Properties;
 import java.nio.file.Files;
 
+import org.apache.calcite.adapter.enumerable.EnumerableRel;
 import org.apache.calcite.config.CalciteConnectionProperty;
 import org.apache.calcite.jdbc.CalciteConnection;
 import org.apache.calcite.plan.RelOptUtil;
@@ -59,13 +62,82 @@ public class App {
         Files.writeString(outputPath.toPath(), resultSetString.toString());
     }
 
+    private static class QueryIO {
+        public File input;
+        public String output_base;
+        public File outputDir;
+
+        public QueryIO(File input, File outputDir) {
+            this.input = input;
+            this.outputDir = outputDir;
+            this.output_base = input.getName().replace(".sql", "");
+        }
+
+        public String readInputSql() throws IOException {
+            return Files.readString(input.toPath());
+        }
+
+        public File getOutputFile(String suffix) {
+            return new File(outputDir, output_base + suffix);
+        }
+
+        public void writeOriginalSql(String originalSql) throws IOException {
+            File file = getOutputFile(".sql");
+            Files.writeString(file.toPath(), originalSql);
+        }
+
+        public void writeLogicalPlan(RelNode logicalPlan) throws IOException {
+            File file = getOutputFile(".txt");
+            SerializePlan(logicalPlan, file);
+        }
+
+        public void writeOptimizedPlan(EnumerableRel optimizedPlan) throws IOException {
+            File file = getOutputFile("_optimized.txt");
+            SerializePlan(optimizedPlan, file);
+        }
+
+        public void writeOptimizedSql(String optimizedSql) throws IOException {
+            File file = getOutputFile("_optimized.sql");
+            Files.writeString(file.toPath(), optimizedSql);
+        }
+
+        public void writeResultSet(ResultSet resultSet) throws SQLException, IOException {
+            File file = getOutputFile("_results.csv");
+            SerializeResultSet(resultSet, file);
+        }
+    }
+
+    private static List<String> discoverInputFileNames(File queriesDir) {
+        List<String> inputFiles = new ArrayList<>();
+        for (File file : queriesDir.listFiles()) {
+            if (file.isFile() && file.getName().endsWith(".sql")) {
+                inputFiles.add(file.getName());
+            }
+        }
+        inputFiles.sort((f1Name, f2Name) -> {
+            if (f1Name.startsWith("q") && f2Name.startsWith("q")) {
+                int f1Num = Integer.parseInt(f1Name.substring(1, f1Name.indexOf('.')));
+                int f2Num = Integer.parseInt(f2Name.substring(1, f2Name.indexOf('.')));
+                return Integer.compare(f1Num, f2Num);
+            }
+            return f1Name.compareTo(f2Name);
+        });
+
+        LOGGER.info("Discovered {} input SQL queries", inputFiles.size());
+        return inputFiles;
+    }
+
     public static void main(String[] args) throws Exception {
-        System.out.println("Running the app!");
+        LOGGER.info("Running the app!");
 
         File queriesDir = new File(args[0]);
-        System.out.println("\tqueriesDir: " + queriesDir.getCanonicalPath());
+        LOGGER.info("queriesDir: {}", queriesDir.getCanonicalPath());
         File outputDir = new File(args[1]);
-        System.out.println("\toutputDir: " + outputDir.getCanonicalPath());
+        LOGGER.info("outputDir: {}", outputDir.getCanonicalPath());
+
+        // List<String> inputFileNames = discoverInputFileNames(queriesDir);
+        List<String> inputFileNames = new ArrayList<>();
+        inputFileNames.add("q9.sql");
 
         Properties props = new Properties();
         props.setProperty(CalciteConnectionProperty.CASE_SENSITIVE.camelName(), "false");
@@ -77,41 +149,44 @@ public class App {
 
         QO799Tool tool = new QO799Tool(conn);
 
-        File queryFile = new File(queriesDir, "q1.sql");
-        String query = Files.readString(queryFile.toPath());
-        File outputQueryFile = new File(outputDir, "q1.sql");
-        Files.writeString(outputQueryFile.toPath(), query);
-        tool.planQuery(query).ifPresent(logicalPlan -> {
-            try {
-                File outputLogicalPlanFile = new File(outputDir, "q1.txt");
-                SerializePlan(logicalPlan, outputLogicalPlanFile);
-            } catch (IOException e) {
-                LOGGER.warn("Failed to serialize logical plan: " + e.getMessage());
-            }
-            tool.optimizePlan(logicalPlan).ifPresent(physicalPlan -> {
+        for (String inputFileName : inputFileNames) {
+            LOGGER.info("===== PROCESSING {} =====", inputFileName);
+            File inputFile = new File(queriesDir, inputFileName);
+            QueryIO io = new QueryIO(inputFile, outputDir);
+            String query = io.readInputSql();
+            io.writeOriginalSql(query);
+            tool.planQuery(query).ifPresent(pair -> {
                 try {
-                    File outputPhysicalPlanFile = new File(outputDir, "q1_optimized.txt");
-                    SerializePlan(physicalPlan, outputPhysicalPlanFile);
+                    io.writeLogicalPlan(pair.plan);
                 } catch (IOException e) {
-                    LOGGER.warn("Failed to serialize optimized physical plan: " + e.getMessage());
+                    LOGGER.warn("[{}] Failed to serialize logical plan: {}", e.getMessage());
                 }
-                tool.executeEnumerablePlan(physicalPlan).ifPresent(resultSet -> {
-                    File resultFile = new File(outputDir, "q1_results.csv");
+                RelNode planAfterRewrite = tool.rewritePlan(pair);
+
+                tool.optimizePlan(planAfterRewrite).ifPresent(optimizedPlan -> {
                     try {
-                        SerializeResultSet(resultSet, resultFile);
-                    } catch (SQLException | IOException e) {
-                        LOGGER.warn("Failed to serialize result set: " + e.getMessage());
+                        io.writeOptimizedPlan(optimizedPlan);
+                    } catch (IOException e) {
+                        LOGGER.warn("Failed to serialize optimized physical plan: " + e.getMessage());
+                    }
+                    tool.executeEnumerablePlan(optimizedPlan).ifPresent(resultSet -> {
+                        try {
+                            io.writeResultSet(resultSet);
+                        } catch (SQLException | IOException e) {
+                            LOGGER.warn("Failed to serialize result set: " + e.getMessage());
+                        }
+                    });
+                    String deparsedSql = tool.deparseOptimizizedPlanToSql(optimizedPlan);
+                    try {
+                        io.writeOptimizedSql(deparsedSql);
+                    } catch (IOException e) {
+                        LOGGER.warn("Failed to serialize deparsed SQL: " + e.getMessage());
                     }
                 });
-                String deparsedSql = tool.deparseOptimizizedPlanToSql(physicalPlan);
-                File deparsedFile = new File(outputDir, "q1_optimized.sql");
-                try {
-                    Files.writeString(deparsedFile.toPath(), deparsedSql);
-                } catch (IOException e) {
-                    LOGGER.warn("Failed to serialize deparsed SQL: " + e.getMessage());
-                }
+
             });
-        });
+            LOGGER.info("===== DONE {} =====", inputFileName);
+        }
 
         // Note: in practice, you would probably use
         // org.apache.calcite.tools.Frameworks.

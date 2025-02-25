@@ -57,7 +57,8 @@ public class DuckDbLoader {
             MemoryTable inMemoryTable = new MemoryTable(rowType, rows);
             rootSchema.add(tableName, inMemoryTable);
         }
-        LOGGER.debug("Done loading all tables");
+        conn = null;
+        LOGGER.trace("Done loading all tables");
     }
 
     private static Map<String, RelDataType> extractTableInfo(SchemaPlus rootSchema, RelDataTypeFactory typeFactory,

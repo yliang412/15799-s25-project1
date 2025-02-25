@@ -13,13 +13,16 @@ import org.apache.calcite.jdbc.CalciteSchema;
 import org.apache.calcite.plan.ConventionTraitDef;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelOptPlanner;
-import org.apache.calcite.plan.RelOptRule;
 import org.apache.calcite.plan.RelOptTable;
 import org.apache.calcite.plan.RelOptUtil;
+import org.apache.calcite.plan.hep.HepMatchOrder;
+import org.apache.calcite.plan.hep.HepPlanner;
+import org.apache.calcite.plan.hep.HepProgram;
 import org.apache.calcite.plan.volcano.VolcanoPlanner;
 import org.apache.calcite.prepare.CalciteCatalogReader;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.rel2sql.RelToSqlConverter;
+import org.apache.calcite.rel.rules.CoreRules;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.sql.SqlDialect;
@@ -32,9 +35,13 @@ import org.apache.calcite.sql.validate.SqlValidator;
 import org.apache.calcite.sql.validate.SqlValidatorUtil;
 import org.apache.calcite.sql2rel.SqlToRelConverter;
 import org.apache.calcite.sql2rel.StandardConvertletTable;
+import org.apache.calcite.tools.Programs;
 import org.apache.calcite.tools.RelRunner;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.event.Level;
+
+import com.google.common.collect.ImmutableList;
 
 public class QO799Tool {
     CalciteConnection conn;
@@ -42,7 +49,19 @@ public class QO799Tool {
     SqlValidator validator;
     RelToSqlConverter rel2sql;
     RelOptCluster cluster = null;
+    SqlToRelConverter sql2rel = null;
+
     public static final Logger LOGGER = LoggerFactory.getLogger(QO799Tool.class);
+
+    public final class SqlRelPair {
+        public SqlNode validNode;
+        public RelNode plan;
+
+        public SqlRelPair(SqlNode validNode, RelNode plan) {
+            this.validNode = validNode;
+            this.plan = plan;
+        }
+    }
 
     public QO799Tool(CalciteConnection conn) {
         this.conn = conn;
@@ -53,10 +72,10 @@ public class QO799Tool {
                 conn.config());
         this.validator = SqlValidatorUtil.newValidator(SqlStdOperatorTable.instance(), catalog, typeFactory,
                 SqlValidator.Config.DEFAULT);
-        this.rel2sql = new RelToSqlConverter(SqlDialect.DatabaseProduct.POSTGRESQL.getDialect());
+        this.rel2sql = new RelToSqlConverter(SqlDialect.DatabaseProduct.FIREBOLT.getDialect());
     }
 
-    public Optional<RelNode> planQuery(String inputSql) {
+    public Optional<SqlRelPair> planQuery(String inputSql) {
         SqlParser parser = SqlParser.create(inputSql);
         SqlNode sqlNode;
         try {
@@ -76,35 +95,83 @@ public class QO799Tool {
         }
 
         this.cluster = createCluster(this.validator.getTypeFactory());
-
-        SqlToRelConverter sql2rel = new SqlToRelConverter(
+        this.sql2rel = new SqlToRelConverter(
                 NOOP_EXPANDER,
                 this.validator,
                 this.catalog,
                 cluster,
                 StandardConvertletTable.INSTANCE,
-                SqlToRelConverter.config());
+                SqlToRelConverter.config().withExpand(true));
 
-        RelNode logicalPlan = sql2rel.convertQuery(validNode, false, true).rel;
+        RelNode logicalPlan = this.sql2rel.convertQuery(validNode, false, true).rel;
 
         explainPlan(logicalPlan, "LOGICAL_PLAN - INITIAL");
-        return Optional.of(logicalPlan);
+        return Optional.of(new SqlRelPair(validNode, logicalPlan));
+    }
+
+    public RelNode rewritePlan(SqlRelPair pair) {
+        RelOptPlanner planner = new HepPlanner(HepProgram.builder()
+                .addCommonRelSubExprInstruction()
+                .addRuleCollection(
+                        ImmutableList.of(CoreRules.FILTER_SUB_QUERY_TO_CORRELATE,
+                                CoreRules.PROJECT_SUB_QUERY_TO_CORRELATE,
+                                CoreRules.JOIN_SUB_QUERY_TO_CORRELATE,
+                                CoreRules.PROJECT_OVER_SUM_TO_SUM0_RULE))
+                .build());
+
+        RelNode logicalPlan = pair.plan;
+        planner.setRoot(logicalPlan);
+        RelNode secondVersion = planner.findBestExp();
+
+        explainPlan(secondVersion, "SECOND VERSION");
+
+        RelNode decorrelated = this.sql2rel.decorrelate(pair.validNode, pair.plan);
+
+        explainPlan(decorrelated, "DECORRELATED");
+
+        planner = new HepPlanner(HepProgram.builder().addCommonRelSubExprInstruction()
+                .addRuleInstance(CoreRules.PROJECT_JOIN_REMOVE)
+                .addRuleInstance(CoreRules.PROJECT_JOIN_JOIN_REMOVE)
+                .addRuleInstance(CoreRules.PROJECT_MERGE)
+                .addRuleInstance(CoreRules.FILTER_INTO_JOIN)
+                .addRuleInstance(CoreRules.JOIN_PUSH_EXPRESSIONS)
+                .addSubprogram(HepProgram.builder()
+                        .addRuleInstance(CoreRules.FILTER_INTO_JOIN)
+                        .addMatchOrder(HepMatchOrder.BOTTOM_UP)
+                        .addRuleInstance(CoreRules.JOIN_TO_MULTI_JOIN).build())
+                .addRuleInstance(CoreRules.MULTI_JOIN_OPTIMIZE)
+                .addCommonRelSubExprInstruction()
+                .build());
+        planner.setRoot(decorrelated);
+
+        RelNode afterHeuristics = planner.findBestExp();
+
+        explainPlan(afterHeuristics, "AFTER_HEURISTICS");
+        return decorrelated;
     }
 
     public Optional<EnumerableRel> optimizePlan(RelNode logicalPlan) {
         RelOptPlanner planner = cluster.getPlanner();
 
-        RelOptUtil.registerDefaultRules(planner, false, false);
+        // RelOptUtil.registerDefaultRules(planner, false, false);
 
-        for (RelOptRule rule : EnumerableRules.ENUMERABLE_RULES) {
-            planner.addRule(rule);
-        }
+        planner.addRule(CoreRules.FILTER_SUB_QUERY_TO_CORRELATE);
+        planner.addRule(CoreRules.PROJECT_SUB_QUERY_TO_CORRELATE);
+        planner.addRule(CoreRules.JOIN_SUB_QUERY_TO_CORRELATE);
+        planner.addRule(CoreRules.PROJECT_OVER_SUM_TO_SUM0_RULE);
         planner.addRule(EnumerableRules.ENUMERABLE_LIMIT_SORT_RULE);
-        planner.addRule(EnumerableRules.ENUMERABLE_TABLE_SCAN_RULE);
+        planner.addRule(EnumerableRules.ENUMERABLE_SORTED_AGGREGATE_RULE);
+
+        Programs.RULE_SET.forEach(planner::addRule);
+        planner.addRule(CoreRules.PROJECT_JOIN_REMOVE);
+        planner.addRule(CoreRules.JOIN_PUSH_EXPRESSIONS);
+        planner.removeRule(CoreRules.JOIN_ASSOCIATE);
         planner.removeRule(EnumerableRules.ENUMERABLE_LIMIT_RULE);
+        planner.removeRule(EnumerableRules.ENUMERABLE_MERGE_JOIN_RULE);
 
         logicalPlan = planner.changeTraits(logicalPlan,
                 cluster.traitSet().replace(EnumerableConvention.INSTANCE));
+
         planner.setRoot(logicalPlan);
 
         EnumerableRel physicalPlan;
@@ -135,14 +202,18 @@ public class QO799Tool {
     public String deparseOptimizizedPlanToSql(EnumerableRel physicalPlan) {
         SqlNode sqlNode = this.rel2sql.visitRoot(physicalPlan).asStatement();
         String deparsedSql = sqlNode.toSqlString(SqlDialect.DatabaseProduct.POSTGRESQL.getDialect()).getSql();
-        LOGGER.debug("Deparsed SQL: {0}", deparsedSql.replace('\n', ' '));
+        LOGGER.debug("Deparsed SQL: {}", deparsedSql.replace('\n', ' '));
         return deparsedSql;
     }
 
-    private static void explainPlan(RelNode plan, String header) {
+    private static void explainPlan(RelNode plan, String header, Level level) {
         String planDump = RelOptUtil.dumpPlan("\n==== " + header + " ====", plan, SqlExplainFormat.TEXT,
                 SqlExplainLevel.ALL_ATTRIBUTES);
-        LOGGER.debug(planDump);
+        LOGGER.atLevel(level).log(planDump);
+    }
+
+    private static void explainPlan(RelNode plan, String header) {
+        explainPlan(plan, header, Level.DEBUG);
     }
 
     private static RelOptCluster createCluster(RelDataTypeFactory typeFactory) {
