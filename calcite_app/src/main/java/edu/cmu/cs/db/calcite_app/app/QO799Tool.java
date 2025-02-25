@@ -4,6 +4,9 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.Collections;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import org.apache.calcite.adapter.enumerable.EnumerableConvention;
 import org.apache.calcite.adapter.enumerable.EnumerableRel;
@@ -147,7 +150,7 @@ public class QO799Tool {
         RelNode afterHeuristics = planner.findBestExp();
 
         explainPlan(afterHeuristics, "AFTER_HEURISTICS");
-        return decorrelated;
+        return afterHeuristics;
     }
 
     public Optional<EnumerableRel> optimizePlan(RelNode logicalPlan) {
@@ -160,7 +163,6 @@ public class QO799Tool {
         planner.addRule(CoreRules.JOIN_SUB_QUERY_TO_CORRELATE);
         planner.addRule(CoreRules.PROJECT_OVER_SUM_TO_SUM0_RULE);
         planner.addRule(EnumerableRules.ENUMERABLE_LIMIT_SORT_RULE);
-        planner.addRule(EnumerableRules.ENUMERABLE_SORTED_AGGREGATE_RULE);
 
         Programs.RULE_SET.forEach(planner::addRule);
         planner.addRule(CoreRules.PROJECT_JOIN_REMOVE);
@@ -188,13 +190,24 @@ public class QO799Tool {
     }
 
     public Optional<ResultSet> executeEnumerablePlan(EnumerableRel physicalPlan) {
+        CompletableFuture<Optional<ResultSet>> future = CompletableFuture.supplyAsync(() -> {
+            try {
+                RelRunner relRunner = conn.unwrap(RelRunner.class);
+                PreparedStatement prepareStmt = relRunner.prepareStatement(physicalPlan);
+                ResultSet rs = prepareStmt.executeQuery();
+                return Optional.of(rs);
+            } catch (Exception e) {
+                LOGGER.warn("Error executing plan using `RelRunner`: " + e.getMessage());
+                return Optional.empty();
+            }
+        });
+
         try {
-            RelRunner relRunner = conn.unwrap(RelRunner.class);
-            PreparedStatement prepareStmt = relRunner.prepareStatement(physicalPlan);
-            ResultSet rs = prepareStmt.executeQuery();
-            return Optional.of(rs);
+            return future.get(15, TimeUnit.SECONDS);
+        } catch (TimeoutException e) {
+            LOGGER.warn("Timeout executing plan");
+            return Optional.empty();
         } catch (Exception e) {
-            LOGGER.warn("Error executing plan using `RelRunner`: " + e.getMessage());
             return Optional.empty();
         }
     }

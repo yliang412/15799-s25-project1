@@ -135,9 +135,9 @@ public class App {
         File outputDir = new File(args[1]);
         LOGGER.info("outputDir: {}", outputDir.getCanonicalPath());
 
-        // List<String> inputFileNames = discoverInputFileNames(queriesDir);
-        List<String> inputFileNames = new ArrayList<>();
-        inputFileNames.add("q9.sql");
+        List<String> inputFileNames = discoverInputFileNames(queriesDir);
+        // List<String> inputFileNames = new ArrayList<>();
+        // inputFileNames.add("q9.sql");
 
         Properties props = new Properties();
         props.setProperty(CalciteConnectionProperty.CASE_SENSITIVE.camelName(), "false");
