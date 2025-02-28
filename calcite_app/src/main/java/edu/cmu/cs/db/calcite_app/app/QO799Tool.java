@@ -198,6 +198,8 @@ public class QO799Tool {
         planner.addRule(CoreRules.JOIN_REDUCE_EXPRESSIONS);
         planner.addRule(CoreRules.AGGREGATE_REDUCE_FUNCTIONS);
         planner.addRule(CoreRules.AGGREGATE_PROJECT_MERGE);
+        planner.addRule(CoreRules.AGGREGATE_JOIN_TRANSPOSE);
+        planner.addRule(CoreRules.AGGREGATE_PROJECT_PULL_UP_CONSTANTS);
         planner.addRule(CoreRules.SORT_PROJECT_TRANSPOSE);
         planner.addRule(CoreRules.JOIN_EXTRACT_FILTER);
         planner.addRule(CoreRules.FILTER_INTERPRETER_SCAN);
@@ -245,7 +247,7 @@ public class QO799Tool {
         });
 
         try {
-            return future.get(15, TimeUnit.SECONDS);
+            return future.get(20, TimeUnit.SECONDS);
         } catch (TimeoutException e) {
             LOGGER.warn("Timeout executing plan");
             return Optional.empty();
