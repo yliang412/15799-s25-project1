@@ -26,6 +26,7 @@ import org.apache.calcite.prepare.CalciteCatalogReader;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.rel2sql.RelToSqlConverter;
 import org.apache.calcite.rel.rules.CoreRules;
+import org.apache.calcite.rel.rules.PruneEmptyRules;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.sql.SqlDialect;
@@ -38,7 +39,6 @@ import org.apache.calcite.sql.validate.SqlValidator;
 import org.apache.calcite.sql.validate.SqlValidatorUtil;
 import org.apache.calcite.sql2rel.SqlToRelConverter;
 import org.apache.calcite.sql2rel.StandardConvertletTable;
-import org.apache.calcite.tools.Programs;
 import org.apache.calcite.tools.RelRunner;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -76,6 +76,12 @@ public class QO799Tool {
         this.validator = SqlValidatorUtil.newValidator(SqlStdOperatorTable.instance(), catalog, typeFactory,
                 SqlValidator.Config.DEFAULT);
         this.rel2sql = new RelToSqlConverter(SqlDialect.DatabaseProduct.FIREBOLT.getDialect());
+    }
+
+    public RelNode decorrelatePlan(SqlRelPair pair) {
+        RelNode decorrelated = this.sql2rel.decorrelate(pair.validNode, pair.plan);
+        explainPlan(decorrelated, "DECORRELATED");
+        return decorrelated;
     }
 
     public Optional<SqlRelPair> planQuery(String inputSql) {
@@ -120,6 +126,8 @@ public class QO799Tool {
                                 CoreRules.PROJECT_SUB_QUERY_TO_CORRELATE,
                                 CoreRules.JOIN_SUB_QUERY_TO_CORRELATE,
                                 CoreRules.PROJECT_OVER_SUM_TO_SUM0_RULE))
+                .addRuleInstance(CoreRules.PROJECT_CORRELATE_TRANSPOSE)
+                .addRuleInstance(CoreRules.FILTER_CORRELATE)
                 .build());
 
         RelNode logicalPlan = pair.plan;
@@ -154,25 +162,46 @@ public class QO799Tool {
     }
 
     public Optional<EnumerableRel> optimizePlan(RelNode logicalPlan) {
-        RelOptPlanner planner = cluster.getPlanner();
+        RelOptPlanner planner = this.cluster.getPlanner();
 
-        // RelOptUtil.registerDefaultRules(planner, false, false);
+        planner.addRule(EnumerableRules.ENUMERABLE_TABLE_SCAN_RULE);
+        planner.addRule(EnumerableRules.ENUMERABLE_JOIN_RULE);
+        planner.addRule(EnumerableRules.ENUMERABLE_CORRELATE_RULE);
+        planner.addRule(EnumerableRules.ENUMERABLE_PROJECT_RULE);
+        planner.addRule(EnumerableRules.ENUMERABLE_FILTER_RULE);
+        planner.addRule(EnumerableRules.ENUMERABLE_AGGREGATE_RULE);
+        planner.addRule(EnumerableRules.ENUMERABLE_SORT_RULE);
+        planner.addRule(EnumerableRules.ENUMERABLE_LIMIT_SORT_RULE);
+        planner.addRule(EnumerableRules.ENUMERABLE_LIMIT_RULE);
+        planner.addRule(EnumerableRules.ENUMERABLE_VALUES_RULE);
 
+        planner.addRule(CoreRules.FILTER_INTO_JOIN);
+        planner.addRule(CoreRules.FILTER_PROJECT_TRANSPOSE);
+        planner.addRule(CoreRules.FILTER_AGGREGATE_TRANSPOSE);
+        planner.addRule(CoreRules.FILTER_MERGE);
+        planner.addRule(CoreRules.JOIN_COMMUTE);
+        planner.addRule(CoreRules.PROJECT_AGGREGATE_MERGE);
+        planner.addRule(CoreRules.PROJECT_REMOVE);
+        planner.addRule(CoreRules.PROJECT_MERGE);
+        planner.addRule(CoreRules.PROJECT_JOIN_TRANSPOSE);
+        planner.addRule(CoreRules.AGGREGATE_EXPAND_DISTINCT_AGGREGATES);
+        planner.addRule(CoreRules.FILTER_REDUCE_EXPRESSIONS);
+        planner.addRule(CoreRules.JOIN_REDUCE_EXPRESSIONS);
+        planner.addRule(CoreRules.AGGREGATE_REDUCE_FUNCTIONS);
+        planner.addRule(CoreRules.AGGREGATE_PROJECT_MERGE);
+        planner.addRule(CoreRules.FILTER_INTERPRETER_SCAN);
+        planner.addRule(PruneEmptyRules.AGGREGATE_INSTANCE);
+        planner.addRule(PruneEmptyRules.FILTER_INSTANCE);
+        planner.addRule(PruneEmptyRules.SORT_FETCH_ZERO_INSTANCE);
+        planner.addRule(PruneEmptyRules.SORT_INSTANCE);
+        planner.addRule(PruneEmptyRules.PROJECT_INSTANCE);
         planner.addRule(CoreRules.FILTER_SUB_QUERY_TO_CORRELATE);
         planner.addRule(CoreRules.PROJECT_SUB_QUERY_TO_CORRELATE);
         planner.addRule(CoreRules.JOIN_SUB_QUERY_TO_CORRELATE);
         planner.addRule(CoreRules.PROJECT_OVER_SUM_TO_SUM0_RULE);
-        planner.addRule(EnumerableRules.ENUMERABLE_LIMIT_SORT_RULE);
-
-        Programs.RULE_SET.forEach(planner::addRule);
-        planner.addRule(CoreRules.PROJECT_JOIN_REMOVE);
-        planner.addRule(CoreRules.JOIN_PUSH_EXPRESSIONS);
-        planner.removeRule(CoreRules.JOIN_ASSOCIATE);
-        planner.removeRule(EnumerableRules.ENUMERABLE_LIMIT_RULE);
-        planner.removeRule(EnumerableRules.ENUMERABLE_MERGE_JOIN_RULE);
 
         logicalPlan = planner.changeTraits(logicalPlan,
-                cluster.traitSet().replace(EnumerableConvention.INSTANCE));
+                this.cluster.traitSet().replace(EnumerableConvention.INSTANCE));
 
         planner.setRoot(logicalPlan);
 
@@ -189,7 +218,7 @@ public class QO799Tool {
         return Optional.of(physicalPlan);
     }
 
-    public Optional<ResultSet> executeEnumerablePlan(EnumerableRel physicalPlan) {
+    public Optional<ResultSet> executeEnumerablePlan(RelNode physicalPlan) {
         CompletableFuture<Optional<ResultSet>> future = CompletableFuture.supplyAsync(() -> {
             try {
                 RelRunner relRunner = conn.unwrap(RelRunner.class);
@@ -219,14 +248,14 @@ public class QO799Tool {
         return deparsedSql;
     }
 
-    private static void explainPlan(RelNode plan, String header, Level level) {
+    public static void explainPlan(RelNode plan, String header, Level level) {
         String planDump = RelOptUtil.dumpPlan("\n==== " + header + " ====", plan, SqlExplainFormat.TEXT,
                 SqlExplainLevel.ALL_ATTRIBUTES);
         LOGGER.atLevel(level).log(planDump);
     }
 
-    private static void explainPlan(RelNode plan, String header) {
-        explainPlan(plan, header, Level.DEBUG);
+    public static void explainPlan(RelNode plan, String header) {
+        explainPlan(plan, header, Level.INFO);
     }
 
     private static RelOptCluster createCluster(RelDataTypeFactory typeFactory) {

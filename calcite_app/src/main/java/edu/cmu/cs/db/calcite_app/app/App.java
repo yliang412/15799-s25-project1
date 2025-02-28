@@ -12,7 +12,6 @@ import java.util.List;
 import java.util.Properties;
 import java.nio.file.Files;
 
-import org.apache.calcite.adapter.enumerable.EnumerableRel;
 import org.apache.calcite.config.CalciteConnectionProperty;
 import org.apache.calcite.jdbc.CalciteConnection;
 import org.apache.calcite.plan.RelOptUtil;
@@ -91,7 +90,7 @@ public class App {
             SerializePlan(logicalPlan, file);
         }
 
-        public void writeOptimizedPlan(EnumerableRel optimizedPlan) throws IOException {
+        public void writeOptimizedPlan(RelNode optimizedPlan) throws IOException {
             File file = getOutputFile("_optimized.txt");
             SerializePlan(optimizedPlan, file);
         }
@@ -137,7 +136,7 @@ public class App {
 
         List<String> inputFileNames = discoverInputFileNames(queriesDir);
         // List<String> inputFileNames = new ArrayList<>();
-        // inputFileNames.add("q9.sql");
+        // inputFileNames.add("q4.sql");
 
         Properties props = new Properties();
         props.setProperty(CalciteConnectionProperty.CASE_SENSITIVE.camelName(), "false");
@@ -161,15 +160,17 @@ public class App {
                 } catch (IOException e) {
                     LOGGER.warn("[{}] Failed to serialize logical plan: {}", e.getMessage());
                 }
-                RelNode planAfterRewrite = tool.rewritePlan(pair);
 
-                tool.optimizePlan(planAfterRewrite).ifPresent(optimizedPlan -> {
+                RelNode afterRewrite = tool.rewritePlan(pair);
+                tool.optimizePlan(afterRewrite).ifPresent(optimizedPlan -> {
+                    pair.plan = optimizedPlan;
+                    RelNode decorrelatePlan = tool.decorrelatePlan(pair);
                     try {
-                        io.writeOptimizedPlan(optimizedPlan);
+                        io.writeOptimizedPlan(decorrelatePlan);
                     } catch (IOException e) {
                         LOGGER.warn("Failed to serialize optimized physical plan: " + e.getMessage());
                     }
-                    tool.executeEnumerablePlan(optimizedPlan).ifPresent(resultSet -> {
+                    tool.executeEnumerablePlan(decorrelatePlan).ifPresent(resultSet -> {
                         try {
                             io.writeResultSet(resultSet);
                         } catch (SQLException | IOException e) {
