@@ -186,20 +186,19 @@ public class QO799Tool {
         planner.addRule(CoreRules.FILTER_PROJECT_TRANSPOSE);
         planner.addRule(CoreRules.FILTER_AGGREGATE_TRANSPOSE);
         planner.addRule(CoreRules.FILTER_MERGE);
-        planner.addRule(CoreRules.JOIN_COMMUTE);
         planner.addRule(CoreRules.SEMI_JOIN_FILTER_TRANSPOSE);
         planner.addRule(CoreRules.JOIN_TO_SEMI_JOIN);
         planner.addRule(CoreRules.SEMI_JOIN_JOIN_TRANSPOSE);
         planner.addRule(CoreRules.PROJECT_AGGREGATE_MERGE);
+        planner.addRule(CoreRules.PROJECT_FILTER_VALUES_MERGE);
+        planner.addRule(CoreRules.AGGREGATE_ANY_PULL_UP_CONSTANTS);
         planner.addRule(CoreRules.PROJECT_REMOVE);
         planner.addRule(CoreRules.PROJECT_JOIN_TRANSPOSE);
-        planner.addRule(CoreRules.AGGREGATE_EXPAND_DISTINCT_AGGREGATES);
         planner.addRule(CoreRules.FILTER_REDUCE_EXPRESSIONS);
         planner.addRule(CoreRules.JOIN_REDUCE_EXPRESSIONS);
         planner.addRule(CoreRules.AGGREGATE_REDUCE_FUNCTIONS);
         planner.addRule(CoreRules.AGGREGATE_PROJECT_MERGE);
         planner.addRule(CoreRules.AGGREGATE_JOIN_TRANSPOSE);
-        planner.addRule(CoreRules.AGGREGATE_PROJECT_PULL_UP_CONSTANTS);
         planner.addRule(CoreRules.SORT_PROJECT_TRANSPOSE);
         planner.addRule(CoreRules.JOIN_EXTRACT_FILTER);
         planner.addRule(CoreRules.FILTER_INTERPRETER_SCAN);
@@ -212,6 +211,8 @@ public class QO799Tool {
         planner.addRule(CoreRules.PROJECT_SUB_QUERY_TO_CORRELATE);
         planner.addRule(CoreRules.JOIN_SUB_QUERY_TO_CORRELATE);
         planner.addRule(CoreRules.PROJECT_OVER_SUM_TO_SUM0_RULE);
+        planner.addRule(CoreRules.JOIN_COMMUTE_OUTER);
+        planner.addRule(CoreRules.AGGREGATE_EXPAND_DISTINCT_AGGREGATES);
         planner.addRule(JoinPushThroughJoinRule.RIGHT);
         planner.addRule(JoinPushThroughJoinRule.LEFT);
 
@@ -247,7 +248,7 @@ public class QO799Tool {
         });
 
         try {
-            return future.get(20, TimeUnit.SECONDS);
+            return future.get(10, TimeUnit.SECONDS);
         } catch (TimeoutException e) {
             LOGGER.warn("Timeout executing plan");
             return Optional.empty();
