@@ -259,7 +259,7 @@ public class QO799Tool {
 
     public String deparseOptimizizedPlanToSql(RelNode physicalPlan) {
         SqlNode sqlNode = this.rel2sql.visitRoot(physicalPlan).asStatement();
-        String deparsedSql = sqlNode.toSqlString(SqlDialect.DatabaseProduct.FIREBOLT.getDialect()).getSql();
+        String deparsedSql = sqlNode.toSqlString(SqlDialect.DatabaseProduct.POSTGRESQL.getDialect()).getSql();
         LOGGER.debug("Deparsed SQL: {}", deparsedSql.replace('\n', ' '));
         return deparsedSql;
     }
