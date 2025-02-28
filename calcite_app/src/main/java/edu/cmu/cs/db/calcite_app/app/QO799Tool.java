@@ -283,6 +283,7 @@ public class QO799Tool {
 
     private static final RelOptTable.ViewExpander NOOP_EXPANDER = (rowType, queryString, schemaPath, viewPath) -> null;
 
+    @SuppressWarnings("unused")
     private static class QO799RelOptListener implements RelOptListener {
 
         public QO799RelOptListener() {
