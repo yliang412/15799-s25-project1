@@ -136,7 +136,7 @@ public class App {
 
         List<String> inputFileNames = discoverInputFileNames(queriesDir);
         // List<String> inputFileNames = new ArrayList<>();
-        // inputFileNames.add("q4.sql");
+        // inputFileNames.add("q7.sql");
 
         Properties props = new Properties();
         props.setProperty(CalciteConnectionProperty.CASE_SENSITIVE.camelName(), "false");
@@ -177,7 +177,7 @@ public class App {
                             LOGGER.warn("Failed to serialize result set: " + e.getMessage());
                         }
                     });
-                    String deparsedSql = tool.deparseOptimizizedPlanToSql(optimizedPlan);
+                    String deparsedSql = tool.deparseOptimizizedPlanToSql(decorrelatePlan);
                     try {
                         io.writeOptimizedSql(deparsedSql);
                     } catch (IOException e) {

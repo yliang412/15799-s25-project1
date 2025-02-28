@@ -15,6 +15,7 @@ import org.apache.calcite.jdbc.CalciteConnection;
 import org.apache.calcite.jdbc.CalciteSchema;
 import org.apache.calcite.plan.ConventionTraitDef;
 import org.apache.calcite.plan.RelOptCluster;
+import org.apache.calcite.plan.RelOptListener;
 import org.apache.calcite.plan.RelOptPlanner;
 import org.apache.calcite.plan.RelOptTable;
 import org.apache.calcite.plan.RelOptUtil;
@@ -26,6 +27,7 @@ import org.apache.calcite.prepare.CalciteCatalogReader;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.rel2sql.RelToSqlConverter;
 import org.apache.calcite.rel.rules.CoreRules;
+import org.apache.calcite.rel.rules.JoinPushThroughJoinRule;
 import org.apache.calcite.rel.rules.PruneEmptyRules;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexBuilder;
@@ -37,8 +39,11 @@ import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.sql.parser.SqlParser;
 import org.apache.calcite.sql.validate.SqlValidator;
 import org.apache.calcite.sql.validate.SqlValidatorUtil;
+import org.apache.calcite.sql2rel.RelDecorrelator;
 import org.apache.calcite.sql2rel.SqlToRelConverter;
 import org.apache.calcite.sql2rel.StandardConvertletTable;
+import org.apache.calcite.tools.Frameworks;
+import org.apache.calcite.tools.RelBuilder;
 import org.apache.calcite.tools.RelRunner;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -79,7 +84,8 @@ public class QO799Tool {
     }
 
     public RelNode decorrelatePlan(SqlRelPair pair) {
-        RelNode decorrelated = this.sql2rel.decorrelate(pair.validNode, pair.plan);
+        RelNode decorrelated = RelDecorrelator.decorrelateQuery(pair.plan,
+                RelBuilder.create(Frameworks.newConfigBuilder().build()));
         explainPlan(decorrelated, "DECORRELATED");
         return decorrelated;
     }
@@ -136,7 +142,7 @@ public class QO799Tool {
 
         explainPlan(secondVersion, "SECOND VERSION");
 
-        RelNode decorrelated = this.sql2rel.decorrelate(pair.validNode, pair.plan);
+        RelNode decorrelated = this.decorrelatePlan(pair);
 
         explainPlan(decorrelated, "DECORRELATED");
 
@@ -175,20 +181,25 @@ public class QO799Tool {
         planner.addRule(EnumerableRules.ENUMERABLE_LIMIT_RULE);
         planner.addRule(EnumerableRules.ENUMERABLE_VALUES_RULE);
 
+        planner.addRule(CoreRules.PROJECT_TO_CALC);
         planner.addRule(CoreRules.FILTER_INTO_JOIN);
         planner.addRule(CoreRules.FILTER_PROJECT_TRANSPOSE);
         planner.addRule(CoreRules.FILTER_AGGREGATE_TRANSPOSE);
         planner.addRule(CoreRules.FILTER_MERGE);
         planner.addRule(CoreRules.JOIN_COMMUTE);
+        planner.addRule(CoreRules.SEMI_JOIN_FILTER_TRANSPOSE);
+        planner.addRule(CoreRules.JOIN_TO_SEMI_JOIN);
+        planner.addRule(CoreRules.SEMI_JOIN_JOIN_TRANSPOSE);
         planner.addRule(CoreRules.PROJECT_AGGREGATE_MERGE);
         planner.addRule(CoreRules.PROJECT_REMOVE);
-        planner.addRule(CoreRules.PROJECT_MERGE);
         planner.addRule(CoreRules.PROJECT_JOIN_TRANSPOSE);
         planner.addRule(CoreRules.AGGREGATE_EXPAND_DISTINCT_AGGREGATES);
         planner.addRule(CoreRules.FILTER_REDUCE_EXPRESSIONS);
         planner.addRule(CoreRules.JOIN_REDUCE_EXPRESSIONS);
         planner.addRule(CoreRules.AGGREGATE_REDUCE_FUNCTIONS);
         planner.addRule(CoreRules.AGGREGATE_PROJECT_MERGE);
+        planner.addRule(CoreRules.SORT_PROJECT_TRANSPOSE);
+        planner.addRule(CoreRules.JOIN_EXTRACT_FILTER);
         planner.addRule(CoreRules.FILTER_INTERPRETER_SCAN);
         planner.addRule(PruneEmptyRules.AGGREGATE_INSTANCE);
         planner.addRule(PruneEmptyRules.FILTER_INSTANCE);
@@ -199,6 +210,8 @@ public class QO799Tool {
         planner.addRule(CoreRules.PROJECT_SUB_QUERY_TO_CORRELATE);
         planner.addRule(CoreRules.JOIN_SUB_QUERY_TO_CORRELATE);
         planner.addRule(CoreRules.PROJECT_OVER_SUM_TO_SUM0_RULE);
+        planner.addRule(JoinPushThroughJoinRule.RIGHT);
+        planner.addRule(JoinPushThroughJoinRule.LEFT);
 
         logicalPlan = planner.changeTraits(logicalPlan,
                 this.cluster.traitSet().replace(EnumerableConvention.INSTANCE));
@@ -241,9 +254,9 @@ public class QO799Tool {
         }
     }
 
-    public String deparseOptimizizedPlanToSql(EnumerableRel physicalPlan) {
+    public String deparseOptimizizedPlanToSql(RelNode physicalPlan) {
         SqlNode sqlNode = this.rel2sql.visitRoot(physicalPlan).asStatement();
-        String deparsedSql = sqlNode.toSqlString(SqlDialect.DatabaseProduct.POSTGRESQL.getDialect()).getSql();
+        String deparsedSql = sqlNode.toSqlString(SqlDialect.DatabaseProduct.FIREBOLT.getDialect()).getSql();
         LOGGER.debug("Deparsed SQL: {}", deparsedSql.replace('\n', ' '));
         return deparsedSql;
     }
@@ -255,15 +268,44 @@ public class QO799Tool {
     }
 
     public static void explainPlan(RelNode plan, String header) {
-        explainPlan(plan, header, Level.INFO);
+        explainPlan(plan, header, Level.DEBUG);
     }
 
     private static RelOptCluster createCluster(RelDataTypeFactory typeFactory) {
         RelOptPlanner planner = new VolcanoPlanner();
         planner.addRelTraitDef(ConventionTraitDef.INSTANCE);
+        // planner.addListener(new QO799RelOptListener());
         return RelOptCluster.create(planner, new RexBuilder(typeFactory));
     }
 
     private static final RelOptTable.ViewExpander NOOP_EXPANDER = (rowType, queryString, schemaPath, viewPath) -> null;
+
+    private static class QO799RelOptListener implements RelOptListener {
+
+        public QO799RelOptListener() {
+        }
+
+        @Override
+        public void relEquivalenceFound(RelEquivalenceEvent event) {
+        }
+
+        @Override
+        public void ruleAttempted(RuleAttemptedEvent event) {
+        }
+
+        @Override
+        public void ruleProductionSucceeded(RuleProductionEvent event) {
+            LOGGER.info("Rule succeeded: " + event.getRuleCall().getRule().toString());
+        }
+
+        @Override
+        public void relDiscarded(RelDiscardedEvent event) {
+        }
+
+        @Override
+        public void relChosen(RelChosenEvent event) {
+        }
+
+    }
 
 }
